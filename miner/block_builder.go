@@ -65,6 +65,10 @@ type blockOracle interface {
 	BlockEligible(layerID types.LayerID) (types.ATXID, []types.BlockEligibilityProof, error)
 }
 
+type baseBlockProvider interface {
+	BaseBlock(getres func(id types.LayerID) ([]types.BlockID, error)) (types.BlockID, [][]types.BlockID, error)
+}
+
 // BlockBuilder is the struct that orchestrates the building of blocks, it is responsible for receiving hare results.
 // referencing txs and atxs from mem pool and referencing them in the created block
 // it is also responsible for listening to the clock and querying when a block should be created according to the block oracle
@@ -85,6 +89,7 @@ type BlockBuilder struct {
 	network          p2p.Service
 	weakCoinToss     weakCoinProvider
 	meshProvider     meshProvider
+	baseBlockP       baseBlockProvider
 	blockOracle      blockOracle
 	txValidator      txValidator
 	atxValidator     atxValidator
@@ -97,7 +102,7 @@ type BlockBuilder struct {
 
 // NewBlockBuilder creates a struct of block builder type.
 func NewBlockBuilder(minerID types.NodeID, sgn signer, net p2p.Service, beginRoundEvent chan types.LayerID, hdist int,
-	txPool txPool, atxPool *AtxMemPool, weakCoin weakCoinProvider, orph meshProvider, hare hareResultProvider,
+	txPool txPool, atxPool *AtxMemPool, weakCoin weakCoinProvider, orph meshProvider, bbp baseBlockProvider, hare hareResultProvider,
 	blockOracle blockOracle, txValidator txValidator, atxValidator atxValidator, syncer syncer, atxsPerBlock int,
 	layersPerEpoch uint16, projector projector, lg log.Log) *BlockBuilder {
 
@@ -120,6 +125,7 @@ func NewBlockBuilder(minerID types.NodeID, sgn signer, net p2p.Service, beginRou
 		network:          net,
 		weakCoinToss:     weakCoin,
 		meshProvider:     orph,
+		baseBlockP:       bbp,
 		blockOracle:      blockOracle,
 		txValidator:      txValidator,
 		atxValidator:     atxValidator,
@@ -257,15 +263,16 @@ func (t *BlockBuilder) getVotes(id types.LayerID) ([]types.BlockID, error) {
 func (t *BlockBuilder) createBlock(id types.LayerID, atxID types.ATXID, eligibilityProof types.BlockEligibilityProof,
 	txids []types.TransactionID, atxids []types.ATXID) (*types.Block, error) {
 
-	votes, err := t.getVotes(id)
+	base, diffs, err := t.baseBlockP.BaseBlock(t.hareResult.GetResult)
 	if err != nil {
 		return nil, err
 	}
 
-	viewEdges, err := t.meshProvider.GetOrphanBlocksBefore(id)
-	if err != nil {
-		return nil, err
-	}
+	// TODO: Compare all orphans to input vector and add to diffs
+	//viewEdges, err := t.meshProvider.GetOrphanBlocksBefore(id)
+	//if err != nil {
+	//	return nil, err
+	//}
 
 	b := types.MiniBlock{
 		BlockHeader: types.BlockHeader{
@@ -275,8 +282,10 @@ func (t *BlockBuilder) createBlock(id types.LayerID, atxID types.ATXID, eligibil
 			Data:             nil,
 			Coin:             t.weakCoinToss.GetResult(),
 			Timestamp:        time.Now().UnixNano(),
-			BlockVotes:       votes,
-			ViewEdges:        viewEdges,
+			BaseBlock:        base,
+			AgainstDiff:      diffs[0],
+			ForDiff:          diffs[1],
+			NeutralDiff:      diffs[2],
 		},
 		ATXIDs: selectAtxs(atxids, t.atxsPerBlock),
 		TxIDs:  txids,
@@ -298,8 +307,10 @@ func (t *BlockBuilder) createBlock(id types.LayerID, atxID types.ATXID, eligibil
 		bl.MinerID(),
 		log.Int("tx_count", len(bl.TxIDs)),
 		log.Int("atx_count", len(bl.ATXIDs)),
-		log.Int("view_edges", len(bl.ViewEdges)),
-		log.Int("vote_count", len(bl.BlockVotes)),
+		bl.BaseBlock.Field(),
+		log.Int("against_count", len(bl.AgainstDiff)),
+		log.Int("neutral_count", len(bl.NeutralDiff)),
+		log.Int("support_count", len(bl.ForDiff)),
 		bl.ATXID,
 		log.Uint32("eligibility_counter", bl.EligibilityProof.J),
 	)
