@@ -31,6 +31,7 @@ type DB struct {
 	contextualValidity database.Database
 	general            database.Database
 	unappliedTxs       database.Database
+	inputVector        database.Database
 	unappliedTxsMutex  sync.Mutex
 	orphanBlocks       map[types.LayerID]map[types.BlockID]struct{}
 	layerMutex         map[types.LayerID]*layerMutex
@@ -64,6 +65,10 @@ func NewPersistentMeshDB(path string, blockCacheSize int, log log.Log) (*DB, err
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize mesh unappliedTxs db: %v", err)
 	}
+	iv, err := database.NewLDBDatabase(filepath.Join(path, "inputvector"), 0, 0, log)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize mesh unappliedTxs db: %v", err)
+	}
 
 	ll := &DB{
 		Log:                log,
@@ -74,6 +79,7 @@ func NewPersistentMeshDB(path string, blockCacheSize int, log log.Log) (*DB, err
 		general:            gdb,
 		contextualValidity: vdb,
 		unappliedTxs:       utx,
+		inputVector:        iv,
 		orphanBlocks:       make(map[types.LayerID]map[types.BlockID]struct{}),
 		layerMutex:         make(map[types.LayerID]*layerMutex),
 		exit:               make(chan struct{}),
@@ -102,6 +108,7 @@ func NewMemMeshDB(log log.Log) *DB {
 		contextualValidity: database.NewMemDatabase(),
 		transactions:       database.NewMemDatabase(),
 		unappliedTxs:       database.NewMemDatabase(),
+		inputVector:        database.NewMemDatabase(),
 		orphanBlocks:       make(map[types.LayerID]map[types.BlockID]struct{}),
 		layerMutex:         make(map[types.LayerID]*layerMutex),
 		exit:               make(chan struct{}),
@@ -116,6 +123,7 @@ func (m *DB) Close() {
 	m.layers.Close()
 	m.transactions.Close()
 	m.unappliedTxs.Close()
+	m.inputVector.Close()
 	m.general.Close()
 	m.contextualValidity.Close()
 }
@@ -267,10 +275,38 @@ func (m *DB) SaveContextualValidity(id types.BlockID, valid bool) error {
 	return m.contextualValidity.Put(id.Bytes(), v)
 }
 
+func (m *DB) SaveLayerInputVector(lyrid types.LayerID, vector []types.BlockID) error {
+	i, err := types.InterfaceToBytes(vector)
+	if err != nil {
+		return err
+	}
+
+	return m.inputVector.Put(lyrid.Bytes(), i)
+}
+
+func (m *DB) GetLayerInputVector(lyrid types.LayerID) ([]types.BlockID, error) {
+
+	by, err := m.inputVector.Get(lyrid.Bytes())
+	if err != nil {
+		return nil, err
+	}
+	var v []types.BlockID
+	err = types.BytesToInterface(by, &v)
+	if err != nil {
+		return nil, err
+	}
+
+	return v, nil
+}
+
 // SaveContextualValidity persists opinion on block to the database
 func (m *DB) SaveBlockVote(id types.BlockID, vote []byte) error {
 	m.Debug("save contextual validity %v %v", id, vote)
 	return m.contextualValidity.Put(id.Bytes(), vote)
+}
+
+func (m *DB) GetBlockVote(id types.BlockID) ([]byte, error) {
+	return m.contextualValidity.Get(id.Bytes())
 }
 
 func (m *DB) writeBlock(bl *types.Block) error {
